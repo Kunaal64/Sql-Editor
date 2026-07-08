@@ -1,0 +1,19 @@
+{
+  "name": "sql-editor-backend",
+  "version": "1.0.0",
+  "description": "Backend for the SQL Editor POC",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "keywords": ["sql", "editor", "poc"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {}
+}
