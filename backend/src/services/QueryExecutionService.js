@@ -4,11 +4,17 @@ class QueryExecutionService {
   }
 
   async execute(sql) {
-    return this.provider.execute(sql);
+    console.log(`[Service] executing SQL: ${sql}`);
+    const result = await this.provider.execute(sql);
+    console.log('[Service] SQL execution complete');
+    return result;
   }
 
   async getSchema() {
-    return this.provider.getSchema();
+    console.log('[Service] loading schema');
+    const schema = await this.provider.getSchema();
+    console.log('[Service] schema loaded');
+    return schema;
   }
 }
 
