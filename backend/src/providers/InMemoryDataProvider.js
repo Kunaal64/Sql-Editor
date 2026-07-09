@@ -1,128 +1,141 @@
 const { join } = require('path');
 const Database = require('better-sqlite3');
 const {
-  inferTableSchemas,
-  createTableSql,
   loadSqlDumps,
-  extractCreateTableStatements,
+  extractFileSchema,
+  extractReferencedTables,
   tableExists,
-  normalizeMockDataTable,
+  createTableSql,
 } = require('../data/schemaLoader');
 
 const DATA_DIR = join(__dirname, '../data');
 
 /**
- * Executes real SQL against an in-memory SQLite database seeded from every
- * .sql file in src/data/. Because SQLite runs the queries, joins, aggregations,
- * subqueries, window functions, and any other SQLite-supported SQL work out of
- * the box.
+ * Executes real SQL against an in-memory SQLite database.
  *
- * Tables are discovered automatically: if a dump contains CREATE TABLE it is
- * used as-is; otherwise the schema is inferred from INSERT column lists and
- * value types.
+ * Datasets are lazy-loaded: at startup we only scan the .sql files to build a
+ * registry of table schemas. When a query arrives we detect which tables it
+ * references, load only those files into SQLite, and cache them for the next
+ * query. This lets the backend scale to hundreds of datasets without paying the
+ * memory/time cost of loading everything up front.
  */
 class InMemoryDataProvider {
   constructor() {
     this.db = new Database(':memory:');
-    this.bootstrap();
-  }
+    this.registry = this.buildRegistry();
 
-  async execute(query) {
-    const start = Date.now();
-
-    try {
-      const statement = this.db.prepare(query);
-      const rawRows = statement.all();
-      const columnMetadata = this.buildColumnMetadata(statement.columns());
-
-      // Normalize BigInt values so they serialize cleanly over JSON.
-      const rows = rawRows.map((row) => this.serializeRow(row));
-
-      return {
-        columns: columnMetadata,
-        rows,
-        rowCount: rows.length,
-        executionTimeMs: Date.now() - start,
-      };
-    } catch (err) {
-      throw this.mapError(err);
+    // Map each table name (case-insensitive) to its registry entry so queries
+    // that reference a table can be resolved instantly.
+    this.tableToEntry = new Map();
+    for (const entry of this.registry) {
+      for (const tableName of entry.tables) {
+        this.tableToEntry.set(tableName.toLowerCase(), entry);
+      }
     }
   }
 
-  async getSchema() {
-    return this.readSchemaFromSQLite();
-  }
-
-  bootstrap() {
+  buildRegistry() {
     const dumps = loadSqlDumps(DATA_DIR);
 
     if (dumps.length === 0) {
       throw new Error('No .sql dataset files found in src/data/');
     }
 
-    // Normalize each dump: INSERT-only files that only reference MOCK_DATA
-    // get renamed to the filename so multiple datasets don't collapse into
-    // one table.
-    const normalizedDumps = dumps.map(({ file, sql }) => ({
-      file,
-      ...normalizeMockDataTable(file, sql),
-    }));
+    return dumps.map(({ file, sql }) => {
+      const { tables, normalizedSql } = extractFileSchema(file, sql);
+      const tableNames = tables.map((t) => t.name);
+      console.log(`Registered dataset: ${file} -> ${tableNames.join(', ')}`);
 
-    // Pass 1: run CREATE TABLE statements first so we respect the schema
-    // defined in the dump files. Use IF NOT EXISTS to tolerate duplicates.
-    for (const { sql } of normalizedDumps) {
-      const createStatements = extractCreateTableStatements(sql);
-      for (const stmt of createStatements) {
-        const safeStmt = stmt.replace(/\bCREATE\s+TABLE\b/gi, 'CREATE TABLE IF NOT EXISTS');
-        this.db.exec(safeStmt);
-      }
-    }
-
-    // Pass 2: infer schemas from INSERT statements and create any tables
-    // that are still missing.
-    const allSql = normalizedDumps.map((d) => d.sql).join('\n');
-    const inferred = inferTableSchemas(allSql);
-    for (const table of inferred.tables) {
-      if (!tableExists(this.db, table.name)) {
-        this.db.exec(createTableSql(table));
-      }
-    }
-
-    // Pass 3: execute the full dumps (INSERTs, indexes, etc.).
-    // Convert any plain CREATE TABLE to IF NOT EXISTS so overlapping tables
-    // across multiple files don't crash the loader.
-    for (const { file, sql, renamed, originalTable, newTable } of normalizedDumps) {
-      const renameNote = renamed ? ` (${originalTable} -> ${newTable})` : '';
-      console.log(`Loading dataset: ${file}${renameNote}`);
-      const safeSql = sql.replace(/\bCREATE\s+TABLE\b/gi, 'CREATE TABLE IF NOT EXISTS');
-      this.db.exec(safeSql);
-    }
+      return {
+        file,
+        sql: normalizedSql,
+        tables: tableNames,
+        schema: { tables },
+        loaded: false,
+      };
+    });
   }
 
-  readSchemaFromSQLite() {
-    const tables = this.db
-      .prepare(
-        `SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%';`
-      )
-      .all();
-
+  async getSchema() {
+    // Return schemas from the registry without loading any data.
     return {
-      tables: tables.map(({ name }) => ({
-        name,
-        columns: this.readColumns(name),
-      })),
+      tables: this.registry.flatMap((entry) => entry.schema.tables),
     };
   }
 
-  readColumns(tableName) {
-    const rows = this.db
-      .prepare(`PRAGMA table_info(${this.quoteIdentifier(tableName)});`)
-      .all();
+  /**
+   * Loads the dataset file(s) that contain the referenced tables, if they have
+   * not been loaded already. Whole files are loaded atomically because a single
+   * dump can contain CREATE TABLE + INSERT for multiple interrelated tables.
+   */
+  ensureTablesLoaded(tableNames) {
+    for (const tableName of tableNames) {
+      const entry = this.tableToEntry.get(tableName.toLowerCase());
+      if (!entry || entry.loaded) continue;
 
-    return rows.map((row) => ({
-      name: row.name,
-      type: row.type || 'TEXT',
-    }));
+      // Create any tables defined by this file that do not exist yet.
+      // This is needed for INSERT-only dumps where the schema was inferred
+      // from INSERT column lists rather than declared with CREATE TABLE.
+      for (const table of entry.schema.tables) {
+        if (!tableExists(this.db, table.name)) {
+          this.db.exec(createTableSql(table));
+        }
+      }
+
+      console.log(`Lazy-loading dataset: ${entry.file}`);
+      const safeSql = entry.sql.replace(
+        /\bCREATE\s+TABLE\b/gi,
+        'CREATE TABLE IF NOT EXISTS'
+      );
+      this.db.exec(safeSql);
+      entry.loaded = true;
+    }
+  }
+
+  async execute(query, options = {}) {
+    const start = Date.now();
+    const { page, pageSize } = options;
+
+    try {
+      const normalizedSql = query.trim().replace(/;$/, '');
+      const allKnownTables = this.registry.flatMap((entry) => entry.tables);
+      const referencedTables = extractReferencedTables(
+        normalizedSql,
+        allKnownTables
+      );
+      this.ensureTablesLoaded(referencedTables);
+
+      const isSelect = /^\s*SELECT/i.test(normalizedSql);
+      let finalSql = normalizedSql;
+      let params = [];
+      let totalRowCount = null;
+
+      if (isSelect && page != null && pageSize != null) {
+        const countStmt = this.db.prepare(
+          `SELECT COUNT(*) AS c FROM (${normalizedSql})`
+        );
+        totalRowCount = Number(countStmt.get().c);
+        finalSql = `SELECT * FROM (${normalizedSql}) LIMIT ? OFFSET ?`;
+        params = [pageSize, page * pageSize];
+      }
+
+      const statement = this.db.prepare(finalSql);
+      const rawRows = statement.all(...params);
+      const columnMetadata = this.buildColumnMetadata(statement.columns());
+      const rows = rawRows.map((row) => this.serializeRow(row));
+
+      return {
+        columns: columnMetadata,
+        rows,
+        rowCount: rows.length,
+        totalRowCount: totalRowCount ?? rows.length,
+        page: page ?? 0,
+        pageSize: pageSize ?? rows.length,
+        executionTimeMs: Date.now() - start,
+      };
+    } catch (err) {
+      throw this.mapError(err);
+    }
   }
 
   buildColumnMetadata(columns) {

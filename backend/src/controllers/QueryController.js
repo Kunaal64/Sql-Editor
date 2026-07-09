@@ -25,8 +25,8 @@ class QueryController {
   }
 
   async executeQuery(req, res) {
-    const { sql } = req.body;
-    console.log(`[Controller] executeQuery received sql="${sql}"`);
+    const { sql, page, pageSize } = req.body;
+    console.log(`[Controller] executeQuery received sql="${sql}" page=${page} pageSize=${pageSize}`);
 
     if (!sql || typeof sql !== 'string') {
       console.warn('[Controller] executeQuery rejected: missing or invalid sql field');
@@ -36,9 +36,11 @@ class QueryController {
       });
     }
 
+    const paginationOptions = this.parsePagination(page, pageSize);
+
     try {
-      const result = await this.service.execute(sql);
-      console.log(`[Controller] executeQuery succeeded, rows=${Array.isArray(result) ? result.length : '-'}`);
+      const result = await this.service.execute(sql, paginationOptions);
+      console.log(`[Controller] executeQuery succeeded, rows=${result.rowCount}/${result.totalRowCount}`);
       res.json(result);
     } catch (err) {
       const apiError = this.toApiError(err);
@@ -46,6 +48,21 @@ class QueryController {
       console.error(`[Controller] executeQuery failed: [${apiError.code}] ${apiError.message}`);
       res.status(status).json(apiError);
     }
+  }
+
+  parsePagination(page, pageSize) {
+    const parsedPage = Number.isFinite(Number(page)) ? Number(page) : undefined;
+    const parsedPageSize = Number.isFinite(Number(pageSize)) ? Number(pageSize) : undefined;
+
+    if (parsedPage == null || parsedPageSize == null) {
+      return {};
+    }
+
+    const maxPageSize = Number(process.env.MAX_PAGE_SIZE) || 5000;
+    const safePage = Math.max(0, Math.floor(parsedPage));
+    const safePageSize = Math.max(1, Math.min(maxPageSize, Math.floor(parsedPageSize)));
+
+    return { page: safePage, pageSize: safePageSize };
   }
 
   toApiError(err) {

@@ -13,3 +13,5 @@ services:
         value: production
       - key: CORS_ORIGIN
         sync: false
+      - key: MAX_PAGE_SIZE
+        value: "5000"

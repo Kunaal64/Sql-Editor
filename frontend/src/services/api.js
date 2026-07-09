@@ -16,11 +16,11 @@ export async function getSchema() {
   return handleResponse(response);
 }
 
-export async function executeQuery(sql) {
+export async function executeQuery(sql, { page = 0, pageSize = 100 } = {}) {
   const response = await fetch(`${API_BASE}/execute-query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sql }),
+    body: JSON.stringify({ sql, page, pageSize }),
   });
   return handleResponse(response);
 }

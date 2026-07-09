@@ -6,12 +6,12 @@ export function useQuery() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const run = useCallback(async (sql) => {
+  const run = useCallback(async (sql, options = {}) => {
     setLoading(true);
     setError(null);
 
     try {
-      const data = await executeQuery(sql);
+      const data = await executeQuery(sql, options);
       setResult(data);
     } catch (err) {
       setResult(null);

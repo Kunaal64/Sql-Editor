@@ -7,20 +7,36 @@ import { useQuery } from './hooks/useQuery';
 import { useSchema } from './hooks/useSchema';
 
 const DEFAULT_QUERY = "SELECT * FROM MOCK_DATA LIMIT 10;";
+const DEFAULT_PAGE_SIZE = 100;
 
 function App() {
   const [sql, setSql] = useState(DEFAULT_QUERY);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const { result, loading, error, run } = useQuery();
   const { schema, loading: schemaLoading, error: schemaError } = useSchema();
 
   const handleRun = async () => {
-    await run(sql);
+    setPage(0);
+    await run(sql, { page: 0, pageSize });
+  };
+
+  const handlePageChange = (newPage) => {
+    setPage(newPage);
+    run(sql, { page: newPage, pageSize });
+  };
+
+  const handlePageSizeChange = (newPageSize) => {
+    setPageSize(newPageSize);
+    setPage(0);
+    run(sql, { page: 0, pageSize: newPageSize });
   };
 
   const handleSelectTable = (tableName) => {
     const newSql = `SELECT * FROM ${tableName} LIMIT 10;`;
     setSql(newSql);
-    run(newSql);
+    setPage(0);
+    run(newSql, { page: 0, pageSize });
   };
 
   const handleKeyDown = (e) => {
@@ -61,7 +77,14 @@ function App() {
           <ErrorPanel error={error} />
 
           <div className="results-panel">
-            <ResultsGrid result={result} />
+            <ResultsGrid
+              result={result}
+              page={page}
+              pageSize={pageSize}
+              loading={loading}
+              onPageChange={handlePageChange}
+              onPageSizeChange={handlePageSizeChange}
+            />
           </div>
         </section>
       </main>
