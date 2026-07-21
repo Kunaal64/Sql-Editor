@@ -19,7 +19,7 @@ export function SchemaExplorer({ schema, loading, error, onSelectTable }) {
 
 function TableNode({ table, onSelectTable }) {
   return (
-    <details className="schema-table" open>
+    <details className="schema-table">
       <summary>
         {table.name}
         {onSelectTable && (

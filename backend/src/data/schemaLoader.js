@@ -14,7 +14,7 @@ function inferTableSchemas(sqlDump) {
   const tables = new Map();
 
   const insertRegex =
-    /insert\s+into\s+([`"\w]+)\s*\(([^)]+)\)\s*values\s*\(([^)]+)\)/gi;
+    /insert\s+into\s+([`"\w]+)\s*\(([^)]+)\)\s*values\s*\(([\s\S]*?)\)/gi;
 
   let match;
   while ((match = insertRegex.exec(sqlDump)) !== null) {
@@ -221,25 +221,38 @@ function normalizeStringEscapes(sql) {
 }
 
 /**
- * Converts common MySQL / MariaDB dump syntax into SQLite-compatible SQL.
- * Applied generically so any future MySQL-style dump loads without edits.
+ * Shared MySQL / MariaDB dump cleanup used by both the SQLite and PostgreSQL
+ * loaders. It strips session directives, locks, MySQL-only table options, and
+ * other dialect-specific syntax that neither target database understands.
+ *
+ * String-literal escaping is *not* applied here; each loader does that in the
+ * order its target needs.
  */
-function normalizeMySqlDump(sql) {
-  const noOptions = sql
+function normalizeMySqlDumpCore(sql) {
+  return sql
+    // Remove MySQL conditional comments used to hide server-only syntax.
+    .replace(/\/\*!\d+\s+[\s\S]*?\*\//g, '')
+    // Remove MariaDB-only conditional comments.
+    .replace(/\/\*M![\s\S]*?\*\//g, '')
     // Remove MySQL session-variable SET statements.
     .replace(/^\s*SET\s+[^;]+;\s*$/gim, '')
     // Remove LOCK / UNLOCK TABLES directives.
     .replace(/^\s*LOCK TABLES\b[^;]+;\s*$/gim, '')
     .replace(/^\s*UNLOCK TABLES\s*;\s*$/gim, '')
-    // Remove transaction statements that may be unmatched after stripping SET AUTOCOMMIT.
+    // Remove transaction wrappers so dumps are safe to run inside our own tx.
     .replace(/^\s*(COMMIT|ROLLBACK|START TRANSACTION|BEGIN)\s*;\s*$/gim, '')
+    // Remove ALTER TABLE ... DISABLE/ENABLE KEYS.
+    .replace(
+      /^\s*ALTER\s+TABLE\s+[^;]+\s+(DISABLE|ENABLE)\s+KEYS\s*;\s*$/gim,
+      ''
+    )
     // Convert UNIQUE KEY `name` (cols) -> CONSTRAINT `name` UNIQUE (cols).
     .replace(/\bUNIQUE\s+KEY\s+([`"]?\w+[`"]?\s*)?(\([^)]+\))/gi, 'CONSTRAINT $1 UNIQUE $2')
     // Remove plain KEY / INDEX table constraints (not PRIMARY/FOREIGN/UNIQUE).
     .replace(/\b(KEY|INDEX)\s+[`"]?\w+[`"]?\s*\([^)]+\)\s*,?/gi, '')
-    // Remove the AUTO_INCREMENT column attribute; SQLite will load the ids from INSERTs.
+    // Remove the AUTO_INCREMENT column attribute; target DBs load ids from INSERTs.
     .replace(/\bAUTO_INCREMENT\b/gi, '')
-    // Convert MySQL function-style timestamp defaults to SQLite keywords.
+    // Convert MySQL function-style timestamp defaults to SQL keywords.
     .replace(/\bDEFAULT\s+current_timestamp\(\)/gi, 'DEFAULT CURRENT_TIMESTAMP')
     .replace(/\bDEFAULT\s+current_date\(\)/gi, 'DEFAULT CURRENT_DATE')
     .replace(/\bDEFAULT\s+current_time\(\)/gi, 'DEFAULT CURRENT_TIME')
@@ -250,25 +263,22 @@ function normalizeMySqlDump(sql) {
     )
     // Collapse leftover multiple spaces.
     .replace(/ {2,}/g, ' ');
+}
 
+/**
+ * Converts common MySQL / MariaDB dump syntax into SQLite-compatible SQL.
+ * Applied generically so any future MySQL-style dump loads without edits.
+ */
+function normalizeMySqlDump(sql) {
   // MySQL uses backslash escapes inside string literals; SQLite uses
   // doubled single quotes. Do this last so we only touch real literals.
-  return normalizeStringEscapes(noOptions);
+  return normalizeStringEscapes(normalizeMySqlDumpCore(sql));
 }
 
 function inferType(value) {
   if (/^-?\d+\.\d+$/.test(value)) return 'REAL';
   if (/^-?\d+$/.test(value)) return 'INTEGER';
   return 'TEXT';
-}
-
-function hasCreateTableFor(sqlDump, tableName) {
-  const escaped = tableName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(
-    `create\\s+table\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?["']?${escaped}["']?`,
-    'i'
-  );
-  return regex.test(sqlDump);
 }
 
 function extractCreateTableStatements(sqlDump) {
@@ -514,6 +524,147 @@ function extractReferencedTables(sql, knownTables) {
   return Array.from(referenced);
 }
 
+/**
+ * Converts a raw SQL dump into PostgreSQL-compatible SQL.
+ *
+ * Handles common MySQL / MariaDB dump syntax and backtick-quoted identifiers.
+ * Keeps the output conservative so it runs on PostgreSQL without requiring
+ * every MySQL feature to be emulated.
+ */
+function normalizeSqlForPostgres(sql) {
+  // 1. Apply the shared MySQL cleanup.
+  let cleaned = normalizeMySqlDumpCore(sql);
+
+  // 2. Convert backtick identifiers to double-quoted identifiers,
+  //    but only outside of string literals.
+  cleaned = convertBackticksToDoubleQuotes(cleaned);
+
+  // 3. Convert MySQL string escapes (\', \", \n, etc.) to standard SQL
+  //    doubled-quote style, which PostgreSQL understands.
+  cleaned = normalizeStringEscapes(cleaned);
+
+  return cleaned;
+}
+
+/**
+ * Walks through a SQL string and replaces backtick-quoted identifiers with
+ * double-quoted identifiers, leaving text inside single-quoted literals alone.
+ */
+function convertBackticksToDoubleQuotes(sql) {
+  let out = '';
+  let i = 0;
+
+  while (i < sql.length) {
+    const char = sql[i];
+
+    if (char === "'") {
+      // Copy single-quoted literal verbatim.
+      let literal = "'";
+      i++;
+      while (i < sql.length) {
+        const c = sql[i];
+        literal += c;
+        if (c === "'" && sql[i - 1] !== '\\') {
+          i++;
+          break;
+        }
+        i++;
+      }
+      out += literal;
+      continue;
+    }
+
+    if (char === '`') {
+      out += '"';
+      i++;
+      continue;
+    }
+
+    out += char;
+    i++;
+  }
+
+  return out;
+}
+
+/**
+ * Maps common MySQL / SQLite types to rough PostgreSQL equivalents.
+ */
+function toPostgresType(type) {
+  if (!type) return 'TEXT';
+  const normalized = String(type).toLowerCase().trim();
+  const baseMatch = normalized.match(/^([a-z]+)/);
+  const base = baseMatch ? baseMatch[1] : normalized;
+  const sizeMatch = normalized.match(/\(([^)]+)\)/);
+  const size = sizeMatch ? `(${sizeMatch[1]})` : '';
+
+  switch (base) {
+    case 'int':
+    case 'integer':
+    case 'tinyint':
+    case 'smallint':
+    case 'mediumint':
+    case 'bigint':
+      return size === '(1)' ? 'BOOLEAN' : 'INTEGER';
+    case 'varchar':
+    case 'char':
+    case 'nvarchar':
+      return `VARCHAR${size || '(255)'}`;
+    case 'text':
+    case 'tinytext':
+    case 'mediumtext':
+    case 'longtext':
+      return 'TEXT';
+    case 'blob':
+    case 'tinyblob':
+    case 'mediumblob':
+    case 'longblob':
+      return 'BYTEA';
+    case 'date':
+      return 'DATE';
+    case 'datetime':
+    case 'timestamp':
+      return 'TIMESTAMP';
+    case 'time':
+      return 'TIME';
+    case 'float':
+      return 'REAL';
+    case 'double':
+      return 'DOUBLE PRECISION';
+    case 'decimal':
+    case 'numeric':
+      return `DECIMAL${size}`;
+    case 'real':
+      return 'REAL';
+    case 'boolean':
+    case 'bool':
+      return 'BOOLEAN';
+    default:
+      return type.toUpperCase();
+  }
+}
+
+/**
+ * Builds a PostgreSQL CREATE TABLE statement from an extracted table schema.
+ *
+ * Identifiers are left unquoted so PostgreSQL folds them to lowercase. This
+ * keeps unquoted user queries (e.g. `SELECT * FROM Trade`) and unquoted INSERTs
+ * in the dump working without having to rewrite every statement. We also drop
+ * any previously-created quoted version so re-seeding starts clean.
+ */
+function createPostgresTableSql(table) {
+  const columnDefs = table.columns
+    .map((col) => `${col.name} ${toPostgresType(col.type)}`)
+    .join(', ');
+
+  const quotedName = quoteIdentifier(table.name);
+  return (
+    `DROP TABLE IF EXISTS ${quotedName} CASCADE;\n` +
+    `DROP TABLE IF EXISTS ${table.name} CASCADE;\n` +
+    `CREATE TABLE ${table.name} (${columnDefs});`
+  );
+}
+
 function loadSqlDumps(dataDir) {
   return readdirSync(dataDir)
     .filter((file) => file.toLowerCase().endsWith('.sql'))
@@ -523,10 +674,46 @@ function loadSqlDumps(dataDir) {
     }));
 }
 
+/**
+ * Removes DELETE / TRUNCATE statements that target tables not present in the
+ * dump. Some dumps (e.g. Sakila) start with cleanup DELETEs for every table
+ * even when a few tables have no INSERTs and therefore no inferred schema.
+ */
+function stripDanglingDeleteStatements(sql, knownTables) {
+  const lowerKnown = new Set(knownTables.map((t) => t.toLowerCase()));
+  const statements = splitTopLevel(sql, ';');
+  const kept = [];
+
+  for (const stmt of statements) {
+    const trimmed = stmt.trim();
+    if (!trimmed) continue;
+
+    const cleaned = sanitizeSqlForAnalysis(trimmed);
+    const deleteMatch = cleaned.match(/\bDELETE\s+FROM\s+["'`]?(\w+)["'`]?/i);
+    const truncateMatch =
+      !deleteMatch &&
+      cleaned.match(/\bTRUNCATE\s+(?:TABLE\s+)?["'`]?(\w+)["'`]?/i);
+
+    const target = deleteMatch
+      ? deleteMatch[1]
+      : truncateMatch
+      ? truncateMatch[1]
+      : null;
+
+    if (target && !lowerKnown.has(target.toLowerCase())) {
+      continue;
+    }
+
+    kept.push(trimmed);
+  }
+
+  if (kept.length === 0) return '';
+  return kept.join(';\n') + ';';
+}
+
 module.exports = {
   inferTableSchemas,
   createTableSql,
-  hasCreateTableFor,
   loadSqlDumps,
   extractCreateTableStatements,
   tableExists,
@@ -537,4 +724,9 @@ module.exports = {
   splitTopLevel,
   extractReferencedTables,
   sanitizeSqlForAnalysis,
+  normalizeSqlForPostgres,
+  toPostgresType,
+  createPostgresTableSql,
+  stripDanglingDeleteStatements,
 };
+

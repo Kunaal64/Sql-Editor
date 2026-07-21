@@ -1,12 +1,13 @@
 # SQL Editor (POC)
 
 A lightweight web SQL editor proof-of-concept. It gives you a Monaco-powered
-SQL editor in the browser and runs queries against an in-memory SQLite
-database seeded from a real SQL dump.
+SQL editor in the browser and runs queries against either an in-memory SQLite
+database (default) or a remote Neon PostgreSQL database.
 
-The backend executes **real SQLite SQL** — not a hand-written parser — so
-joins, aggregations, subqueries, window functions, and any other
-SQLite-supported syntax work out of the box.
+The backend executes **real SQL** — not a hand-written parser — so joins,
+aggregations, subqueries, window functions, and other supported syntax work
+out of the box. The active provider is controlled by the `DATA_PROVIDER`
+environment variable (`sqlite` or `neon`).
 
 ---
 
@@ -32,13 +33,13 @@ SQLite-supported syntax work out of the box.
 - React 18 + JavaScript
 - Vite
 - `@monaco-editor/react`
-- `monaco-sql-languages` (PostgreSQL dialect)
 - AG Grid Community
 
 ### Backend
 
 - Node.js + Express + JavaScript
-- `better-sqlite3` (in-memory SQLite)
+- `better-sqlite3` (in-memory SQLite) — default/fallback
+- `pg` + Neon PostgreSQL — optional remote database
 
 ---
 
@@ -47,18 +48,25 @@ SQLite-supported syntax work out of the box.
 ```
 .
 ├── README.md
-├── MOCK_DATA.sql                      # Sample SQL seed data
 ├── backend/
 │   ├── src/
+│   │   ├── config/
+│   │   │   └── database.js            # Environment / provider config
+│   │   ├── controllers/
+│   │   │   └── QueryController.js
 │   │   ├── data/
-│   │   │   ├── MOCK_DATA.sql          # Copy of seed data
+│   │   │   ├── *.sql                  # Dataset dumps
 │   │   │   └── schemaLoader.js        # Dynamic schema inference / loader
 │   │   ├── providers/
-│   │   │   └── InMemoryDataProvider.js # SQLite-backed DataProvider
-│   │   ├── controllers/
+│   │   │   ├── index.js               # Provider factory
+│   │   │   ├── SqliteDataProvider.js  # In-memory SQLite provider
+│   │   │   └── NeonDataProvider.js    # PostgreSQL / Neon provider
 │   │   ├── routes/
-│   │   ├── services/
+│   │   │   └── index.js
+│   │   ├── sync/
+│   │   │   └── DataSync.js            # Incremental file -> Neon sync
 │   │   └── index.js
+│   ├── .env.example
 │   └── package.json
 └── frontend/
     ├── src/
@@ -71,9 +79,12 @@ SQLite-supported syntax work out of the box.
     │   │   ├── useQuery.js
     │   │   └── useSchema.js
     │   ├── monaco/
-    │   │   └── setup.js               # Monaco + monaco-sql-languages config
+    │   │   └── setup.js               # Monaco configuration
+    │   ├── services/
+    │   │   └── api.js                 # Backend API client
     │   ├── App.jsx
     │   └── main.jsx
+    ├── index.html
     ├── package.json
     └── vite.config.js
 ```
@@ -86,8 +97,13 @@ SQLite-supported syntax work out of the box.
 
 - Node.js 18+
 - npm
+- (Optional) A [Neon](https://neon.tech) project if you want to use PostgreSQL
 
 ### 1. Start the backend
+
+#### SQLite mode (default)
+
+No external database is required.
 
 ```bash
 cd backend
@@ -96,6 +112,37 @@ npm run dev
 ```
 
 The backend runs on `http://localhost:3001`.
+
+#### Neon PostgreSQL mode
+
+1. Copy the environment template:
+
+   ```bash
+   cd backend
+   cp .env.example .env
+   ```
+
+2. Fill in `.env`:
+
+   ```env
+   DATA_PROVIDER=neon
+   DATABASE_URL=postgresql://user:password@host.neon.tech/dbname?sslmode=require
+   NEON_SYNC_ON_START=true
+   NEON_WATCH_DATA_DIR=true
+   NEON_FORCE_RESEED=false
+   NEON_POOL_MAX=5
+   ```
+
+3. Install dependencies and start:
+
+   ```bash
+   npm install
+   npm run dev
+   ```
+
+   On first start the backend uploads every `.sql` file from `backend/src/data/`
+   to Neon. On later starts it only uploads new or changed files (hash-based
+   incremental sync).
 
 ### 2. Start the frontend
 
@@ -148,8 +195,30 @@ curl -X POST http://localhost:5173/api/execute-query \
 
 ## Data
 
-The POC ships with `MOCK_DATA.sql`, a dump of 1,000 synthetic stock trades
-with the following columns:
+The POC ships with sample `.sql` files in `backend/src/data/`:
+
+- `Trade.sql` — 1,000 synthetic stock trades
+- `Social_Media.sql` — social media profile data
+- `auther.sql`, `posts.sql` — MariaDB-style author/post dumps
+
+### SQLite mode
+
+On startup the backend scans `backend/src/data/`, builds a table registry, and
+lazy-loads each dataset the first time it is queried.
+
+### Neon PostgreSQL mode
+
+Datasets are synced to Neon automatically:
+
+- On startup the backend hashes each `.sql` file and compares it with the
+  `_seed_log` table in Neon.
+- Only new or changed files are uploaded, so restarts stay fast.
+- In development the backend also watches `backend/src/data/`; dropping in a
+  new file or editing an existing one triggers a sync.
+- Each file is uploaded inside a transaction. If a file fails, it is skipped
+  and the rest continue.
+
+### Columns in `Trade.sql`
 
 | Column | Type |
 |--------|------|
@@ -296,15 +365,20 @@ QueryController
     │
 QueryExecutionService
     │
-InMemoryDataProvider
-    │
-SQLite (:memory:)
+┌─────────────────────┴─────────────────────┐
+│                                           │
+SqliteDataProvider                 NeonDataProvider
+│                                           │
+better-sqlite3 (:memory:)                   pg + Neon PostgreSQL
 ```
 
 The frontend never talks directly to the database. The backend exposes a
-stable API contract (`QueryRequest`, `QueryResult`, `Schema`, `ApiError`),
-and the provider can later be swapped for PostgreSQL without changing the
-UI.
+stable API contract (`QueryRequest`, `QueryResult`, `Schema`, `ApiError`).
+Switching between SQLite and PostgreSQL only changes the provider
+implementation; the UI stays the same.
+
+When Neon is enabled, `DataSync` keeps the local `backend/src/data/`
+folder in sync with the remote database.
 
 ---
 

@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const { createRouter } = require('./routes');
+const { createProvider } = require('./providers');
+const { DataSync } = require('./sync/DataSync');
+const dbConfig = require('./config/database');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -39,6 +42,7 @@ app.get('/', (_req, res) => {
   res.json({
     name: 'SQL Editor backend',
     status: 'ok',
+    provider: dbConfig.dataProvider,
     endpoints: {
       health: '/api/health',
       schema: '/api/schema',
@@ -47,9 +51,42 @@ app.get('/', (_req, res) => {
   });
 });
 
-// All API routes live under /api
-app.use('/api', createRouter());
+async function bootstrap() {
+  const { provider, pool } = createProvider();
 
-app.listen(PORT, () => {
-  console.log(`SQL Editor backend running on http://localhost:${PORT}`);
+  // Wire up API routes.
+  app.use('/api', createRouter(provider));
+
+  // Sync local dataset files to Neon when configured.
+  let dataSync;
+  if (pool && dbConfig.syncOnStart) {
+    dataSync = new DataSync(pool);
+    await dataSync.sync(dbConfig.forceReseed);
+
+    if (dbConfig.watchDataDir && !dbConfig.isProduction()) {
+      dataSync.watch();
+    }
+  }
+
+  app.listen(PORT, () => {
+    console.log(`SQL Editor backend running on http://localhost:${PORT}`);
+    console.log(`Provider: ${dbConfig.dataProvider}`);
+  });
+
+  // Graceful shutdown.
+  process.on('SIGTERM', () => {
+    dataSync?.stopWatching();
+    pool?.end();
+    process.exit(0);
+  });
+  process.on('SIGINT', () => {
+    dataSync?.stopWatching();
+    pool?.end();
+    process.exit(0);
+  });
+}
+
+bootstrap().catch((err) => {
+  console.error('Failed to start backend:', err.message);
+  process.exit(1);
 });

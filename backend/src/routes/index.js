@@ -1,13 +1,9 @@
 const { Router } = require('express');
 const { QueryController } = require('../controllers/QueryController');
-const { QueryExecutionService } = require('../services/QueryExecutionService');
-const { InMemoryDataProvider } = require('../providers/InMemoryDataProvider');
 
-function createRouter() {
+function createRouter(provider) {
   const router = Router();
-  const provider = new InMemoryDataProvider();
-  const service = new QueryExecutionService(provider);
-  const controller = new QueryController(service);
+  const controller = new QueryController(provider);
 
   router.get('/health', controller.health);
   router.get('/schema', controller.getSchema);

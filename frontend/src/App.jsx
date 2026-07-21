@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { SqlEditor } from './components/SqlEditor';
 import { ResultsGrid } from './components/ResultsGrid';
 import { SchemaExplorer } from './components/SchemaExplorer';
@@ -6,48 +6,77 @@ import { ErrorPanel } from './components/ErrorPanel';
 import { useQuery } from './hooks/useQuery';
 import { useSchema } from './hooks/useSchema';
 
-const DEFAULT_QUERY = "SELECT * FROM MOCK_DATA LIMIT 10;";
+const DEFAULT_QUERY = "SELECT * FROM Trade LIMIT 10;";
 const DEFAULT_PAGE_SIZE = 100;
 
 function App() {
   const [sql, setSql] = useState(DEFAULT_QUERY);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [totalRowCount, setTotalRowCount] = useState(0);
   const { result, loading, error, run } = useQuery();
   const { schema, loading: schemaLoading, error: schemaError } = useSchema();
 
-  const handleRun = async () => {
+  const handleRun = useCallback(async () => {
     setPage(0);
-    await run(sql, { page: 0, pageSize });
-  };
+    await run(sql, { page: 0, pageSize, includeTotalRows: true });
+  }, [run, sql, pageSize]);
 
-  const handlePageChange = (newPage) => {
-    setPage(newPage);
-    run(sql, { page: newPage, pageSize });
-  };
+  const handlePageChange = useCallback(
+    (newPage) => {
+      setPage(newPage);
+      run(sql, { page: newPage, pageSize, includeTotalRows: false });
+    },
+    [run, sql, pageSize]
+  );
 
-  const handlePageSizeChange = (newPageSize) => {
-    setPageSize(newPageSize);
-    setPage(0);
-    run(sql, { page: 0, pageSize: newPageSize });
-  };
+  const handlePageSizeChange = useCallback(
+    (newPageSize) => {
+      setPageSize(newPageSize);
+      setPage(0);
+      run(sql, { page: 0, pageSize: newPageSize, includeTotalRows: false });
+    },
+    [run, sql]
+  );
 
-  const handleSelectTable = (tableName) => {
-    const newSql = `SELECT * FROM ${tableName} LIMIT 10;`;
-    setSql(newSql);
-    setPage(0);
-    run(newSql, { page: 0, pageSize });
-  };
+  const handleSelectTable = useCallback(
+    (tableName) => {
+      const newSql = `SELECT * FROM ${tableName} LIMIT 10;`;
+      setSql(newSql);
+      setPage(0);
+      run(newSql, { page: 0, pageSize, includeTotalRows: true });
+    },
+    [run, pageSize]
+  );
 
-  const handleKeyDown = (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      e.preventDefault();
-      handleRun();
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleRun();
+      }
     }
-  };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleRun]);
+
+  useEffect(() => {
+    if (result?.totalRowCount != null) {
+      setTotalRowCount(result.totalRowCount);
+    }
+  }, [result?.totalRowCount]);
+
+  const gridResult = useMemo(() => {
+    if (!result) return null;
+    return {
+      ...result,
+      totalRowCount: result.totalRowCount ?? totalRowCount,
+    };
+  }, [result, totalRowCount]);
 
   return (
-    <div className="app" onKeyDown={handleKeyDown}>
+    <div className="app">
       <header className="app-header">
         <h1>SQL Editor</h1>
         <button
@@ -78,7 +107,7 @@ function App() {
 
           <div className="results-panel">
             <ResultsGrid
-              result={result}
+              result={gridResult}
               page={page}
               pageSize={pageSize}
               loading={loading}

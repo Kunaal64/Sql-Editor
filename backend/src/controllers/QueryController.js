@@ -1,6 +1,6 @@
 class QueryController {
-  constructor(service) {
-    this.service = service;
+  constructor(provider) {
+    this.provider = provider;
 
     this.health = this.health.bind(this);
     this.getSchema = this.getSchema.bind(this);
@@ -8,15 +8,12 @@ class QueryController {
   }
 
   health(_req, res) {
-    console.log('[Controller] health check');
     res.json({ status: 'ok' });
   }
 
   async getSchema(_req, res) {
-    console.log('[Controller] fetching schema');
     try {
-      const schema = await this.service.getSchema();
-      console.log(`[Controller] schema returned ${schema.tables?.length || 0} tables`);
+      const schema = await this.provider.getSchema();
       res.json(schema);
     } catch (err) {
       console.error('[Controller] schema failed:', err.message);
@@ -25,22 +22,19 @@ class QueryController {
   }
 
   async executeQuery(req, res) {
-    const { sql, page, pageSize } = req.body;
-    console.log(`[Controller] executeQuery received sql="${sql}" page=${page} pageSize=${pageSize}`);
+    const { sql, page, pageSize, includeTotalRows } = req.body;
 
     if (!sql || typeof sql !== 'string') {
-      console.warn('[Controller] executeQuery rejected: missing or invalid sql field');
       return res.status(400).json({
         code: 'SYNTAX_ERROR',
         message: 'Missing or invalid "sql" field',
       });
     }
 
-    const paginationOptions = this.parsePagination(page, pageSize);
+    const options = this.buildExecutionOptions(page, pageSize, includeTotalRows);
 
     try {
-      const result = await this.service.execute(sql, paginationOptions);
-      console.log(`[Controller] executeQuery succeeded, rows=${result.rowCount}/${result.totalRowCount}`);
+      const result = await this.provider.execute(sql, options);
       res.json(result);
     } catch (err) {
       const apiError = this.toApiError(err);
@@ -50,19 +44,25 @@ class QueryController {
     }
   }
 
-  parsePagination(page, pageSize) {
+  buildExecutionOptions(page, pageSize, includeTotalRows) {
     const parsedPage = Number.isFinite(Number(page)) ? Number(page) : undefined;
-    const parsedPageSize = Number.isFinite(Number(pageSize)) ? Number(pageSize) : undefined;
+    const parsedPageSize = Number.isFinite(Number(pageSize))
+      ? Number(pageSize)
+      : undefined;
 
-    if (parsedPage == null || parsedPageSize == null) {
-      return {};
+    const options = {};
+
+    if (parsedPage != null && parsedPageSize != null) {
+      const maxPageSize = Number(process.env.MAX_PAGE_SIZE) || 5000;
+      options.page = Math.max(0, Math.floor(parsedPage));
+      options.pageSize = Math.max(1, Math.min(maxPageSize, Math.floor(parsedPageSize)));
     }
 
-    const maxPageSize = Number(process.env.MAX_PAGE_SIZE) || 5000;
-    const safePage = Math.max(0, Math.floor(parsedPage));
-    const safePageSize = Math.max(1, Math.min(maxPageSize, Math.floor(parsedPageSize)));
+    if (typeof includeTotalRows === 'boolean') {
+      options.includeTotalRows = includeTotalRows;
+    }
 
-    return { page: safePage, pageSize: safePageSize };
+    return options;
   }
 
   toApiError(err) {

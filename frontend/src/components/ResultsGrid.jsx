@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import { ClientSideRowModelModule, ModuleRegistry } from 'ag-grid-community';
 import 'ag-grid-community/styles/ag-grid.css';
@@ -19,13 +20,17 @@ export function ResultsGrid({
     return <div className="results-empty">Run a query to see results</div>;
   }
 
-  const columnDefs = result.columns.map((col) => ({
-    field: col.name,
-    headerName: `${col.name} (${col.type})`,
-    sortable: true,
-    filter: true,
-    resizable: true,
-  }));
+  const columnDefs = useMemo(
+    () =>
+      result.columns.map((col) => ({
+        field: col.name,
+        headerName: `${col.name} (${col.type})`,
+        sortable: true,
+        filter: true,
+        resizable: true,
+      })),
+    [result.columns]
+  );
 
   const totalPages = Math.max(1, Math.ceil(result.totalRowCount / result.pageSize));
   const canGoPrevious = result.page > 0 && !loading;

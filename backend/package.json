@@ -7,13 +7,18 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js"
   },
-  "keywords": ["sql", "editor", "poc"],
+  "keywords": [
+    "sql",
+    "editor",
+    "poc"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.10.0",
     "cors": "^2.8.5",
-    "express": "^4.19.2"
-  },
-  "devDependencies": {}
+    "dotenv": "^17.4.2",
+    "express": "^4.19.2",
+    "pg": "^8.22.0"
+  }
 }
